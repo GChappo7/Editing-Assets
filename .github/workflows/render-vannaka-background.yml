@@ -114,10 +114,10 @@ jobs:
       - name: Render 12-second seamless diagonal loop
         run: |
           read S_X S_Y MARGIN < /tmp/vannaka-stride.txt
-          ffmpeg -y -loglevel error -framerate 60 -loop 1 -i /tmp/vannaka-pattern-2x.png \
-            -filter_complex "crop=3840:2160:x='${MARGIN}+(${S_X}*n/720)':y='${MARGIN}+(${S_Y}*n/720)':eval=frame,scale=1920:1080:flags=lanczos,format=yuv420p" \
+          ffmpeg -y -hide_banner -loglevel verbose -framerate 60 -loop 1 -i /tmp/vannaka-pattern-2x.png \
+            -vf "crop=3840:2160:'${MARGIN}+${S_X}*t/12':'${MARGIN}+${S_Y}*t/12':eval=frame,scale=1920:1080:flags=lanczos,format=yuv420p" \
             -t 12 -r 60 -an -c:v libx264 -preset slow -crf 18 -pix_fmt yuv420p \
-            -movflags +faststart output/Vannaka_Background.mp4
+            -movflags +faststart output/Vannaka_Background.mp4 2> /tmp/ffmpeg-render.log || { cat /tmp/ffmpeg-render.log; exit 1; }
 
       - name: Commit rendered video
         run: |
