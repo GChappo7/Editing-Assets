@@ -1,7 +1,18 @@
-name: Render Vannaka Background
+name: Render Tiled PNG Background
 
 on:
   workflow_dispatch:
+    inputs:
+      source_image:
+        description: "Repository path to the PNG to tile"
+        required: true
+        default: "Images/Wiki/Vannaka.png"
+        type: string
+      background_color:
+        description: "Background colour: auto or a hex value such as #243047"
+        required: true
+        default: "auto"
+        type: string
   push:
     paths:
       - ".github/workflows/render-vannaka-background.yml"
@@ -14,6 +25,9 @@ jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      SOURCE_IMAGE: \${{ inputs.source_image || 'Images/Wiki/Vannaka.png' }}
+      BACKGROUND_COLOR: \${{ inputs.background_color || 'auto' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -24,7 +38,7 @@ jobs:
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pillow numpy opencv-python-headless
 
-      - name: Prepare tiled Vannaka pattern at 2x resolution
+      - name: Prepare tiled image pattern and choose background
         run: |
           mkdir -p output
           python - <<'PY'
@@ -32,18 +46,61 @@ jobs:
           import numpy as np
           import cv2
           import math
+          import os
+          import re
+          from pathlib import Path
 
-          SOURCE = "Images/Wiki/Vannaka.png"
+          SOURCE = os.environ["SOURCE_IMAGE"]
+          REQUESTED_BG = os.environ.get("BACKGROUND_COLOR", "auto").strip()
           W, H = 3840, 2160
           GAP = 130
           ICON_HEIGHT = 420
 
-          source = Image.open(SOURCE)
+          source_path = Path(SOURCE)
+          if not source_path.is_file():
+              raise FileNotFoundError(f"Source PNG not found: {SOURCE}")
+          if source_path.suffix.lower() != ".png":
+              raise RuntimeError("Please provide a PNG file.")
+          output_path = Path("output") / f"{source_path.stem}_Background.mp4"
+          output_path.parent.mkdir(parents=True, exist_ok=True)
+          with open("/tmp/background-output-path.txt", "w") as f:
+              f.write(str(output_path))
+
+          source = Image.open(source_path)
           rgba_source = source.convert("RGBA")
           corners = [rgba_source.getpixel(p) for p in
                      [(0, 0), (source.width-1, 0),
                       (0, source.height-1), (source.width-1, source.height-1)]]
-          print("Source mode:", source.mode, "size:", source.size, "corners:", corners)
+          print("Source:", SOURCE, "size:", source.size, "mode:", source.mode, "corners:", corners)
+
+          if REQUESTED_BG.lower() == "auto":
+              rgb = np.array(rgba_source.convert("RGB"))
+              alpha = np.array(rgba_source.getchannel("A"))
+              hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+              # Give saturated, visible pixels the strongest vote; ignore near-grey pixels.
+              mask = (alpha > 100) & (hsv[:, :, 1] > 45) & (hsv[:, :, 2] > 35)
+              if np.count_nonzero(mask) > 20:
+                  hist = np.bincount(
+                      hsv[:, :, 0][mask].ravel(),
+                      weights=(hsv[:, :, 1][mask].astype(np.float32) / 255.0),
+                      minlength=180
+                  )
+                  dominant_hue = int(np.argmax(hist))
+                  # A complementary hue, deliberately muted and dark, keeps the icon legible.
+                  bg_hue = (dominant_hue + 90) % 180
+                  bg_hsv = np.uint8([[[bg_hue, 72, 58]]])
+                  bg_rgb = cv2.cvtColor(bg_hsv, cv2.COLOR_HSV2RGB)[0, 0]
+                  bg = tuple(int(c) for c in bg_rgb)
+              else:
+                  bg = (36, 45, 57)  # Safe neutral slate for mostly monochrome artwork.
+              print("Background mode: auto; selected RGB:", bg)
+          else:
+              match = re.fullmatch(r"#?([0-9a-fA-F]{6})", REQUESTED_BG)
+              if not match:
+                  raise RuntimeError("background_color must be 'auto' or a six-digit hex colour such as #243047.")
+              hex_value = match.group(1)
+              bg = tuple(int(hex_value[i:i+2], 16) for i in (0, 2, 4))
+              print(f"Background mode: manual; selected #{hex_value.upper()} RGB: {bg}")
 
           if source.mode in ("RGBA", "LA") or (source.mode == "P" and "transparency" in source.info):
               icon = source.convert("RGBA")
@@ -56,7 +113,7 @@ jobs:
                   candidate = np.max(rgb, axis=2) <= 18
                   bg_kind = "black"
               else:
-                  raise RuntimeError("RGB source has no clearly identifiable white/black background; refusing unsafe removal.")
+                  raise RuntimeError("RGB source has no transparency and no clearly identifiable white/black background; refusing unsafe removal. Please use a transparent PNG.")
               _, labels = cv2.connectedComponents(candidate.astype(np.uint8), connectivity=4)
               border_labels = np.unique(np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]]))
               remove = np.isin(labels, border_labels)
@@ -75,7 +132,7 @@ jobs:
           alpha = np.array(icon.getchannel("A"))
           ys, xs = np.where(alpha > 10)
           if len(xs) == 0:
-              raise RuntimeError("Vannaka source has no visible pixels after transparency preparation.")
+              raise RuntimeError("Source image has no visible pixels after transparency preparation.")
           icon = icon.crop((xs.min(), ys.min(), xs.max()+1, ys.max()+1))
           icon_w = max(1, round(icon.width * ICON_HEIGHT / icon.height))
           icon = icon.resize((icon_w, ICON_HEIGHT), Image.Resampling.LANCZOS)
@@ -97,14 +154,14 @@ jobs:
           rows_n = int(math.ceil((H + S_y*2) / S_y)) + 2
           canvas_w = cols*S_x + margin*2
           canvas_h = rows_n*S_y + margin*2
-          pattern = Image.new("RGBA", (canvas_w, canvas_h), (30, 40, 65, 255))
+          pattern = Image.new("RGBA", (canvas_w, canvas_h), (*bg, 255))
           for row in range(rows_n):
               for col in range(cols):
                   pattern.alpha_composite(shadow_layer, (margin + col*S_x, margin + row*S_y))
-          pattern.convert("RGB").save("/tmp/vannaka-pattern-2x.png", optimize=True)
-          with open("/tmp/vannaka-stride.txt", "w") as f:
+          pattern.convert("RGB").save("/tmp/tiled-pattern-2x.png", optimize=True)
+          with open("/tmp/tiled-stride.txt", "w") as f:
               f.write(f"{S_x} {S_y} {margin}")
-          print(f"Pattern canvas: {canvas_w}x{canvas_h}; icon: {icon.size}; stride: {S_x}x{S_y}; margin: {margin}")
+          print(f"Pattern canvas: {canvas_w}x{canvas_h}; icon: {icon.size}; stride: {S_x}x{S_y}; margin: {margin}; output: {output_path}")
           PY
 
       - name: Render 12-second seamless diagonal loop
@@ -113,13 +170,15 @@ jobs:
           import subprocess
           import cv2
 
-          pattern_path = "/tmp/vannaka-pattern-2x.png"
-          with open("/tmp/vannaka-stride.txt") as f:
+          pattern_path = "/tmp/tiled-pattern-2x.png"
+          with open("/tmp/tiled-stride.txt") as f:
               S_X, S_Y, MARGIN = map(int, f.read().split())
+          with open("/tmp/background-output-path.txt") as f:
+              output_path = f.read().strip()
 
           pattern = cv2.imread(pattern_path, cv2.IMREAD_COLOR)
           if pattern is None:
-              raise RuntimeError("Could not read prepared Vannaka pattern.")
+              raise RuntimeError("Could not read prepared tiled pattern.")
           H, W = 2160, 3840
           out_w, out_h = 1920, 1080
           expected_frames = 720
@@ -129,7 +188,7 @@ jobs:
               "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{out_w}x{out_h}",
               "-r", "60", "-i", "-", "-an", "-c:v", "libx264",
               "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
-              "-t", "12", "-movflags", "+faststart", "output/Vannaka_Background.mp4"
+              "-t", "12", "-movflags", "+faststart", output_path
           ]
           proc = subprocess.Popen(command, stdin=subprocess.PIPE)
           try:
@@ -151,21 +210,23 @@ jobs:
               if proc.poll() is None:
                   proc.kill()
               raise
-          print("Rendered 720 frames at 1920x1080, 60 fps.")
+          print(f"Rendered 720 frames at 1920x1080, 60 fps: {output_path}")
           PY
 
       - name: Verify rendered video
         run: |
-          ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,pix_fmt -show_entries format=duration -of default=noprint_wrappers=1 output/Vannaka_Background.mp4
+          VIDEO_PATH="$(cat /tmp/background-output-path.txt)"
+          ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,pix_fmt -show_entries format=duration -of default=noprint_wrappers=1 "$VIDEO_PATH"
 
       - name: Commit rendered video
         run: |
+          VIDEO_PATH="$(cat /tmp/background-output-path.txt)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add output/Vannaka_Background.mp4
+          git add "$VIDEO_PATH"
           if git diff --cached --quiet; then
             echo "No changes to the rendered video."
           else
-            git commit -m "Render tiled Vannaka looping background"
+            git commit -m "Render tiled background from $(basename "$SOURCE_IMAGE")"
             git push
           fi
