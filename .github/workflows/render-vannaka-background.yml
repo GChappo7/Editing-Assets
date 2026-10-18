@@ -13,6 +13,20 @@ on:
         required: true
         default: "auto"
         type: string
+      icon_scale:
+        description: "Animal/NPC image size as a percentage (40–160)"
+        required: true
+        default: "100"
+        type: number
+      icon_mode:
+        description: "How the image should be styled"
+        required: true
+        default: "standard"
+        type: choice
+        options:
+          - standard
+          - silhouette
+          - monochrome
   push:
     paths:
       - ".github/workflows/render-vannaka-background.yml"
@@ -28,6 +42,8 @@ jobs:
     env:
       SOURCE_IMAGE: ${{ inputs.source_image || 'Images/Wiki/Vannaka.png' }}
       BACKGROUND_COLOR: ${{ inputs.background_color || 'auto' }}
+      ICON_SCALE: ${{ inputs.icon_scale || 100 }}
+      ICON_MODE: ${{ inputs.icon_mode || 'standard' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -42,7 +58,7 @@ jobs:
         run: |
           mkdir -p output
           python - <<'PY'
-          from PIL import Image, ImageFilter, ImageEnhance
+          from PIL import Image, ImageFilter, ImageEnhance, ImageOps
           import numpy as np
           import cv2
           import math
@@ -54,7 +70,17 @@ jobs:
           REQUESTED_BG = os.environ.get("BACKGROUND_COLOR", "auto").strip()
           W, H = 3840, 2160
           GAP = 130
-          ICON_HEIGHT = 420
+          BASE_ICON_HEIGHT = 420
+          try:
+              ICON_SCALE = int(os.environ.get("ICON_SCALE", "100"))
+          except ValueError:
+              raise RuntimeError("icon_scale must be a whole number between 40 and 160.")
+          if not 40 <= ICON_SCALE <= 160:
+              raise RuntimeError("icon_scale must be between 40 and 160.")
+          ICON_HEIGHT = round(BASE_ICON_HEIGHT * ICON_SCALE / 100)
+          ICON_MODE = os.environ.get("ICON_MODE", "standard").strip().lower()
+          if ICON_MODE not in ("standard", "silhouette", "monochrome"):
+              raise RuntimeError("icon_mode must be standard, silhouette, or monochrome.")
 
           source_path = Path(SOURCE)
           if not source_path.is_file():
@@ -136,8 +162,21 @@ jobs:
           icon = icon.crop((xs.min(), ys.min(), xs.max()+1, ys.max()+1))
           icon_w = max(1, round(icon.width * ICON_HEIGHT / icon.height))
           icon = icon.resize((icon_w, ICON_HEIGHT), Image.Resampling.LANCZOS)
-          icon = ImageEnhance.Color(icon).enhance(0.80)
+          icon_alpha = icon.getchannel("A")
+          if ICON_MODE == "silhouette":
+              # Single light neutral fill; preserve the source alpha/shape.
+              icon = Image.new("RGBA", icon.size, (218, 224, 220, 0))
+              icon.putalpha(icon_alpha)
+          elif ICON_MODE == "monochrome":
+              # Preserve shading while tinting the image to a muted cool grey.
+              grey = ImageOps.grayscale(icon.convert("RGB"))
+              tinted = ImageOps.colorize(grey, black="#263238", white="#D4DEDC").convert("RGBA")
+              tinted.putalpha(icon_alpha)
+              icon = tinted
+          else:
+              icon = ImageEnhance.Color(icon).enhance(0.80)
 
+          print(f"Image settings: mode={ICON_MODE}, scale={ICON_SCALE}%, icon size={icon.size}")
           blur, pad, ox, oy = 14, 42, 18, 18
           tile_w = icon.width + pad*2 + abs(ox)
           tile_h = icon.height + pad*2 + abs(oy)
