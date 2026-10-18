@@ -2,6 +2,10 @@ name: Render Vannaka Background
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/render-vannaka-background.yml"
+      - "Images/Wiki/Vannaka.png"
 
 permissions:
   contents: write
