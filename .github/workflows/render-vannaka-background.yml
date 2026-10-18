@@ -22,37 +22,100 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-          python -m pip install --upgrade pillow numpy
+          python -m pip install --upgrade pillow numpy opencv-python-headless
 
-      - name: Render seamless 12-second background
+      - name: Prepare tiled Vannaka pattern at 2x resolution
         run: |
           mkdir -p output
           python - <<'PY'
-          from PIL import Image, ImageDraw
+          from PIL import Image, ImageFilter, ImageEnhance
           import numpy as np
+          import cv2
+          import math
 
+          SOURCE = "Images/Wiki/Vannaka.png"
           W, H = 3840, 2160
-          x = np.linspace(0, 1, W, dtype=np.float32)[None, :]
-          y = np.linspace(0, 1, H, dtype=np.float32)[:, None]
-          diagonal = 0.65 * x + 0.35 * y
-          vignette = np.sqrt(((x - 0.5) / 0.5) ** 2 + ((y - 0.5) / 0.5) ** 2) / np.sqrt(2)
-          lift = (8 * diagonal - 13 * vignette).astype(np.int16)
-          arr = np.empty((H, W, 3), dtype=np.uint8)
-          arr[:, :, 0] = np.clip(30 + lift // 2, 0, 255)
-          arr[:, :, 1] = np.clip(40 + lift, 0, 255)
-          arr[:, :, 2] = np.clip(65 + lift, 0, 255)
-          image = Image.fromarray(arr, "RGB")
-          draw = ImageDraw.Draw(image, "RGBA")
-          for offset in range(-H, W, 180):
-              draw.line((offset, 0, offset + H, H), fill=(155, 175, 215, 8), width=2)
-          image.save("/tmp/vannaka-background.png", optimize=True)
+          GAP = 130
+          ICON_HEIGHT = 420
+
+          source = Image.open(SOURCE)
+          rgba_source = source.convert("RGBA")
+          corners = [rgba_source.getpixel(p) for p in
+                     [(0, 0), (source.width-1, 0),
+                      (0, source.height-1), (source.width-1, source.height-1)]]
+          print("Source mode:", source.mode, "size:", source.size, "corners:", corners)
+
+          if source.mode == "RGBA":
+              icon = source.copy()
+          else:
+              rgb = np.array(source.convert("RGB"))
+              if np.all(rgb[0, 0] >= 230):
+                  candidate = np.all(rgb >= 230, axis=2)
+                  bg_kind = "white"
+              elif np.max(rgb[0, 0]) <= 18:
+                  candidate = np.max(rgb, axis=2) <= 18
+                  bg_kind = "black"
+              else:
+                  raise RuntimeError("RGB source has no clearly identifiable white/black background; refusing unsafe removal.")
+              _, labels = cv2.connectedComponents(candidate.astype(np.uint8), connectivity=4)
+              border_labels = np.unique(np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]]))
+              remove = np.isin(labels, border_labels)
+              alpha = np.where(remove, 0, 255).astype(np.uint8)
+              if bg_kind == "white":
+                  brightness = np.min(rgb, axis=2)
+                  fringe = (brightness > 200) & ~remove
+                  fade = np.clip((230.0 - brightness) / 30.0, 0, 1)
+              else:
+                  brightness = np.max(rgb, axis=2)
+                  fringe = (brightness < 45) & ~remove
+                  fade = np.clip((brightness - 18.0) / 27.0, 0, 1)
+              alpha[fringe] = (255 * fade[fringe]).astype(np.uint8)
+              icon = Image.fromarray(np.dstack([rgb, alpha]), "RGBA")
+
+          # Crop to visible pixels, resize, and slightly desaturate without greyscaling.
+          alpha = np.array(icon.getchannel("A"))
+          ys, xs = np.where(alpha > 10)
+          if len(xs) == 0:
+              raise RuntimeError("Vannaka source has no visible pixels after transparency preparation.")
+          icon = icon.crop((xs.min(), ys.min(), xs.max()+1, ys.max()+1))
+          icon_w = max(1, round(icon.width * ICON_HEIGHT / icon.height))
+          icon = icon.resize((icon_w, ICON_HEIGHT), Image.Resampling.LANCZOS)
+          icon = ImageEnhance.Color(icon).enhance(0.80)
+
+          # Standard drop shadow: offset (18,18), blur 14, opacity 170.
+          blur, pad, ox, oy = 14, 42, 18, 18
+          tile_w = icon.width + pad*2 + abs(ox)
+          tile_h = icon.height + pad*2 + abs(oy)
+          shadow_layer = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
+          shadow_shape = Image.new("RGBA", icon.size, (0, 0, 0, 0))
+          shadow_shape.putalpha(icon.getchannel("A").point(lambda a: 170 if a > 0 else 0))
+          shadow_layer.alpha_composite(shadow_shape, (pad+ox, pad+oy))
+          shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(blur))
+          shadow_layer.alpha_composite(icon, (pad, pad))
+
+          # Standard solid deep slate-blue background.
+          S_x, S_y = tile_w + GAP, tile_h + GAP
+          margin = GAP
+          cols = int(math.ceil((W + S_x*2) / S_x)) + 2
+          rows_n = int(math.ceil((H + S_y*2) / S_y)) + 2
+          canvas_w = cols*S_x + margin*2
+          canvas_h = rows_n*S_y + margin*2
+          pattern = Image.new("RGBA", (canvas_w, canvas_h), (30, 40, 65, 255))
+          for row in range(rows_n):
+              for col in range(cols):
+                  pattern.alpha_composite(shadow_layer, (margin + col*S_x, margin + row*S_y))
+          pattern.convert("RGB").save("/tmp/vannaka-pattern-2x.png", optimize=True)
+          with open("/tmp/vannaka-stride.txt", "w") as f:
+              f.write(f"{S_x} {S_y} {margin}")
+          print(f"Pattern canvas: {canvas_w}x{canvas_h}; icon: {icon.size}; stride: {S_x}x{S_y}; margin: {margin}")
           PY
 
-          ffmpeg -y \
-            -loop 1 -framerate 60 -i /tmp/vannaka-background.png \
-            -loop 1 -framerate 60 -i Images/Wiki/Vannaka.png \
-            -filter_complex "[1:v]scale=-1:1450,format=rgba,split=2[fg][sh];[sh]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.30,gblur=sigma=24[shadow];[0:v][shadow]overlay=x='(W-w)/2+45*sin(2*PI*t/12)':y='(H-h)/2+25*sin(2*PI*t/12+1.570796)'[tmp];[fg]eq=saturation=0.88:brightness=-0.015:contrast=0.98[fg2];[tmp][fg2]overlay=x='(W-w)/2+45*sin(2*PI*t/12)':y='(H-h)/2+25*sin(2*PI*t/12+1.570796)',scale=1920:1080:flags=lanczos,format=yuv420p[v]" \
-            -map "[v]" -t 12 -r 60 -an -c:v libx264 -preset medium -crf 18 \
+      - name: Render 12-second seamless diagonal loop
+        run: |
+          read S_X S_Y MARGIN < /tmp/vannaka-stride.txt
+          ffmpeg -y -framerate 60 -loop 1 -i /tmp/vannaka-pattern-2x.png \
+            -filter_complex "crop=3840:2160:x='${MARGIN}+(${S_X}*t/12)':y='${MARGIN}+(${S_X}*t/12)',scale=1920:1080:flags=lanczos,format=yuv420p" \
+            -t 12 -r 60 -an -c:v libx264 -preset slow -crf 18 -pix_fmt yuv420p \
             -movflags +faststart output/Vannaka_Background.mp4
 
       - name: Commit rendered video
@@ -63,6 +126,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to the rendered video."
           else
-            git commit -m "Render Vannaka looping background video"
+            git commit -m "Render tiled Vannaka looping background"
             git push
           fi
