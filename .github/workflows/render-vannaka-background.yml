@@ -45,8 +45,9 @@ jobs:
                       (0, source.height-1), (source.width-1, source.height-1)]]
           print("Source mode:", source.mode, "size:", source.size, "corners:", corners)
 
-          if source.mode == "RGBA":
-              icon = source.copy()
+          if source.mode in ("RGBA", "LA") or (source.mode == "P" and "transparency" in source.info):
+              # Palette PNGs can carry an alpha table; convert them before cropping.
+              icon = source.convert("RGBA")
           else:
               rgb = np.array(source.convert("RGB"))
               if np.all(rgb[0, 0] >= 230):
