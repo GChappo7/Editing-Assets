@@ -18,33 +18,26 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-          python -m pip install --upgrade pillow
+          python -m pip install --upgrade pillow numpy
 
       - name: Render seamless 12-second background
         run: |
+          mkdir -p output
           python - <<'PY'
           from PIL import Image, ImageDraw
-          import math
+          import numpy as np
 
           W, H = 3840, 2160
-          image = Image.new("RGB", (W, H))
-          pixels = image.load()
-
-          # Deep slate-blue base with a subtle diagonal blue gradient and soft vignette.
-          cx, cy = W / 2, H / 2
-          max_dist = math.sqrt(cx * cx + cy * cy)
-          for y in range(H):
-              for x in range(W):
-                  diagonal = (x / W * 0.65 + y / H * 0.35)
-                  vignette = math.sqrt(((x-cx)/cx)**2 + ((y-cy)/cy)**2) / math.sqrt(2)
-                  lift = int(8 * diagonal - 13 * vignette)
-                  image.putpixel((x, y), (
-                      max(0, min(255, 30 + lift // 2)),
-                      max(0, min(255, 40 + lift)),
-                      max(0, min(255, 65 + lift))
-                  ))
-
-          # Very restrained diagonal texture, kept low-contrast.
+          x = np.linspace(0, 1, W, dtype=np.float32)[None, :]
+          y = np.linspace(0, 1, H, dtype=np.float32)[:, None]
+          diagonal = 0.65 * x + 0.35 * y
+          vignette = np.sqrt(((x - 0.5) / 0.5) ** 2 + ((y - 0.5) / 0.5) ** 2) / np.sqrt(2)
+          lift = (8 * diagonal - 13 * vignette).astype(np.int16)
+          arr = np.empty((H, W, 3), dtype=np.uint8)
+          arr[:, :, 0] = np.clip(30 + lift // 2, 0, 255)
+          arr[:, :, 1] = np.clip(40 + lift, 0, 255)
+          arr[:, :, 2] = np.clip(65 + lift, 0, 255)
+          image = Image.fromarray(arr, "RGB")
           draw = ImageDraw.Draw(image, "RGBA")
           for offset in range(-H, W, 180):
               draw.line((offset, 0, offset + H, H), fill=(155, 175, 215, 8), width=2)
@@ -54,7 +47,7 @@ jobs:
           ffmpeg -y \
             -loop 1 -framerate 60 -i /tmp/vannaka-background.png \
             -loop 1 -framerate 60 -i Images/Wiki/Vannaka.png \
-            -filter_complex "[1:v]scale=-1:1450,format=rgba,split=2[fg][sh];[sh]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.30,gblur=sigma=24[shadow];[0:v][shadow]overlay=x='(W-w)/2+45*sin(2*PI*t/12)':y='(H-h)/2+25*sin(2*PI*t/12+1.570796)'[tmp];[tmp][fg]eq=saturation=0.88:brightness=-0.015:contrast=0.98,overlay=x='(W-w)/2+45*sin(2*PI*t/12)':y='(H-h)/2+25*sin(2*PI*t/12+1.570796)',scale=1920:1080:flags=lanczos,format=yuv420p[v]" \
+            -filter_complex "[1:v]scale=-1:1450,format=rgba,split=2[fg][sh];[sh]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.30,gblur=sigma=24[shadow];[0:v][shadow]overlay=x='(W-w)/2+45*sin(2*PI*t/12)':y='(H-h)/2+25*sin(2*PI*t/12+1.570796)'[tmp];[fg]eq=saturation=0.88:brightness=-0.015:contrast=0.98[fg2];[tmp][fg2]overlay=x='(W-w)/2+45*sin(2*PI*t/12)':y='(H-h)/2+25*sin(2*PI*t/12+1.570796)',scale=1920:1080:flags=lanczos,format=yuv420p[v]" \
             -map "[v]" -t 12 -r 60 -an -c:v libx264 -preset medium -crf 18 \
             -movflags +faststart output/Vannaka_Background.mp4
 
