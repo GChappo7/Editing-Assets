@@ -46,7 +46,6 @@ jobs:
           print("Source mode:", source.mode, "size:", source.size, "corners:", corners)
 
           if source.mode in ("RGBA", "LA") or (source.mode == "P" and "transparency" in source.info):
-              # Palette PNGs can carry an alpha table; convert them before cropping.
               icon = source.convert("RGBA")
           else:
               rgb = np.array(source.convert("RGB"))
@@ -73,7 +72,6 @@ jobs:
               alpha[fringe] = (255 * fade[fringe]).astype(np.uint8)
               icon = Image.fromarray(np.dstack([rgb, alpha]), "RGBA")
 
-          # Crop to visible pixels, resize, and slightly desaturate without greyscaling.
           alpha = np.array(icon.getchannel("A"))
           ys, xs = np.where(alpha > 10)
           if len(xs) == 0:
@@ -83,7 +81,6 @@ jobs:
           icon = icon.resize((icon_w, ICON_HEIGHT), Image.Resampling.LANCZOS)
           icon = ImageEnhance.Color(icon).enhance(0.80)
 
-          # Standard drop shadow: offset (18,18), blur 14, opacity 170.
           blur, pad, ox, oy = 14, 42, 18, 18
           tile_w = icon.width + pad*2 + abs(ox)
           tile_h = icon.height + pad*2 + abs(oy)
@@ -94,7 +91,6 @@ jobs:
           shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(blur))
           shadow_layer.alpha_composite(icon, (pad, pad))
 
-          # Standard solid deep slate-blue background.
           S_x, S_y = tile_w + GAP, tile_h + GAP
           margin = GAP
           cols = int(math.ceil((W + S_x*2) / S_x)) + 2
@@ -113,11 +109,54 @@ jobs:
 
       - name: Render 12-second seamless diagonal loop
         run: |
-          read S_X S_Y MARGIN < /tmp/vannaka-stride.txt
-          ffmpeg -y -hide_banner -loglevel error -framerate 60 -loop 1 -i /tmp/vannaka-pattern-2x.png \
-            -vf "crop=w=3840:h=2160:x=${MARGIN}+${S_X}*n/720:y=${MARGIN}+${S_Y}*n/720:eval=frame,scale=1920:1080:flags=lanczos,format=yuv420p" \
-            -t 12 -r 60 -an -c:v libx264 -preset slow -crf 18 -pix_fmt yuv420p \
-            -movflags +faststart output/Vannaka_Background.mp4
+          python - <<'PY'
+          import subprocess
+          import cv2
+
+          pattern_path = "/tmp/vannaka-pattern-2x.png"
+          with open("/tmp/vannaka-stride.txt") as f:
+              S_X, S_Y, MARGIN = map(int, f.read().split())
+
+          pattern = cv2.imread(pattern_path, cv2.IMREAD_COLOR)
+          if pattern is None:
+              raise RuntimeError("Could not read prepared Vannaka pattern.")
+          H, W = 2160, 3840
+          out_w, out_h = 1920, 1080
+          expected_frames = 720
+
+          command = [
+              "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+              "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{out_w}x{out_h}",
+              "-r", "60", "-i", "-", "-an", "-c:v", "libx264",
+              "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
+              "-t", "12", "-movflags", "+faststart", "output/Vannaka_Background.mp4"
+          ]
+          proc = subprocess.Popen(command, stdin=subprocess.PIPE)
+          try:
+              for n in range(expected_frames):
+                  x = MARGIN + round(S_X * n / expected_frames)
+                  y = MARGIN + round(S_Y * n / expected_frames)
+                  crop = pattern[y:y+H, x:x+W]
+                  if crop.shape[:2] != (H, W):
+                      raise RuntimeError(f"Crop out of bounds on frame {n}: {crop.shape}")
+                  frame = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_LANCZOS4)
+                  proc.stdin.write(frame.tobytes())
+                  if n % 120 == 0:
+                      print(f"Rendered frame {n}/{expected_frames}")
+              proc.stdin.close()
+              result = proc.wait()
+              if result != 0:
+                  raise RuntimeError(f"FFmpeg encoder exited with status {result}")
+          except Exception:
+              if proc.poll() is None:
+                  proc.kill()
+              raise
+          print("Rendered 720 frames at 1920x1080, 60 fps.")
+          PY
+
+      - name: Verify rendered video
+        run: |
+          ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,pix_fmt -show_entries format=duration -of default=noprint_wrappers=1 output/Vannaka_Background.mp4
 
       - name: Commit rendered video
         run: |
