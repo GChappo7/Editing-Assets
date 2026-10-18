@@ -1,0 +1,71 @@
+name: Render Vannaka Background
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install rendering tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pillow
+
+      - name: Render seamless 12-second background
+        run: |
+          python - <<'PY'
+          from PIL import Image, ImageDraw
+          import math
+
+          W, H = 3840, 2160
+          image = Image.new("RGB", (W, H))
+          pixels = image.load()
+
+          # Deep slate-blue base with a subtle diagonal blue gradient and soft vignette.
+          cx, cy = W / 2, H / 2
+          max_dist = math.sqrt(cx * cx + cy * cy)
+          for y in range(H):
+              for x in range(W):
+                  diagonal = (x / W * 0.65 + y / H * 0.35)
+                  vignette = math.sqrt(((x-cx)/cx)**2 + ((y-cy)/cy)**2) / math.sqrt(2)
+                  lift = int(8 * diagonal - 13 * vignette)
+                  image.putpixel((x, y), (
+                      max(0, min(255, 30 + lift // 2)),
+                      max(0, min(255, 40 + lift)),
+                      max(0, min(255, 65 + lift))
+                  ))
+
+          # Very restrained diagonal texture, kept low-contrast.
+          draw = ImageDraw.Draw(image, "RGBA")
+          for offset in range(-H, W, 180):
+              draw.line((offset, 0, offset + H, H), fill=(155, 175, 215, 8), width=2)
+          image.save("/tmp/vannaka-background.png", optimize=True)
+          PY
+
+          ffmpeg -y \
+            -loop 1 -framerate 60 -i /tmp/vannaka-background.png \
+            -loop 1 -framerate 60 -i Images/Wiki/Vannaka.png \
+            -filter_complex "[1:v]scale=-1:1450,format=rgba,split=2[fg][sh];[sh]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.30,gblur=sigma=24[shadow];[0:v][shadow]overlay=x='(W-w)/2+45*sin(2*PI*t/12)':y='(H-h)/2+25*sin(2*PI*t/12+1.570796)'[tmp];[tmp][fg]eq=saturation=0.88:brightness=-0.015:contrast=0.98,overlay=x='(W-w)/2+45*sin(2*PI*t/12)':y='(H-h)/2+25*sin(2*PI*t/12+1.570796)',scale=1920:1080:flags=lanczos,format=yuv420p[v]" \
+            -map "[v]" -t 12 -r 60 -an -c:v libx264 -preset medium -crf 18 \
+            -movflags +faststart output/Vannaka_Background.mp4
+
+      - name: Commit rendered video
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/Vannaka_Background.mp4
+          if git diff --cached --quiet; then
+            echo "No changes to the rendered video."
+          else
+            git commit -m "Render Vannaka looping background video"
+            git push
+          fi
